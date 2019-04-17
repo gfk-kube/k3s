@@ -34,11 +34,12 @@ var (
 	trueVal = true
 )
 
-func Register(ctx context.Context, kubernetes kubernetes.Interface, enabled bool) error {
+func Register(ctx context.Context, kubernetes kubernetes.Interface, enabled, rootless bool) error {
 	clients := coreclient.ClientsFrom(ctx)
 	appClients := appclient.ClientsFrom(ctx)
 
 	h := &handler{
+		rootless:  rootless,
 		enabled:   enabled,
 		nodeCache: clients.Node.Cache(),
 		podCache:  clients.Pod.Cache(),
@@ -59,6 +60,7 @@ func Register(ctx context.Context, kubernetes kubernetes.Interface, enabled bool
 }
 
 type handler struct {
+	rootless     bool
 	enabled      bool
 	nodeCache    coreclient.NodeClientCache
 	podCache     coreclient.PodClientCache
@@ -189,6 +191,11 @@ func (h *handler) podIPs(pods []*core.Pod) ([]string, error) {
 	for k := range ips {
 		ipList = append(ipList, k)
 	}
+
+	if len(ipList) > 0 && h.rootless {
+		return []string{"127.0.0.1"}, nil
+	}
+
 	return ipList, nil
 }
 
@@ -222,7 +229,7 @@ func (h *handler) newDeployment(svc *core.Service) (*apps.Deployment, error) {
 
 	for _, node := range nodes {
 		if Ready.IsTrue(node) {
-			replicas += 1
+			replicas++
 		}
 		if replicas >= 2 {
 			break
@@ -272,11 +279,8 @@ func (h *handler) newDeployment(svc *core.Service) (*apps.Deployment, error) {
 		},
 	}
 
-	for i, port := range svc.Spec.Ports {
-		portName := port.Name
-		if portName == "" {
-			portName = fmt.Sprintf("port-%d", i)
-		}
+	for _, port := range svc.Spec.Ports {
+		portName := fmt.Sprintf("lb-port-%d", port.Port)
 		container := core.Container{
 			Name:            portName,
 			Image:           image,

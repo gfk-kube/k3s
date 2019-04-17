@@ -1,15 +1,18 @@
 package config
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
+	sysnet "net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -115,6 +118,49 @@ func writeKubeConfig(envInfo *cmds.Agent, info clientaccess.Info, controlConfig 
 	return kubeConfigPath, info.WriteKubeConfig(kubeConfigPath)
 }
 
+func isValidResolvConf(resolvConfFile string) bool {
+	file, err := os.Open(resolvConfFile)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	nameserver := regexp.MustCompile(`^nameserver\s+([^\s]*)`)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		ipMatch := nameserver.FindStringSubmatch(scanner.Text())
+		if len(ipMatch) == 2 {
+			ip := sysnet.ParseIP(ipMatch[1])
+			if ip == nil || !ip.IsGlobalUnicast() {
+				return false
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false
+	}
+	return true
+}
+
+func locateOrGenerateResolvConf(envInfo *cmds.Agent) string {
+	if envInfo.ResolvConf != "" {
+		return envInfo.ResolvConf
+	}
+	resolvConfs := []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"}
+	for _, conf := range resolvConfs {
+		if isValidResolvConf(conf) {
+			return conf
+		}
+	}
+
+	tmpConf := filepath.Join(os.TempDir(), "k3s-resolv.conf")
+	if err := ioutil.WriteFile(tmpConf, []byte("nameserver 8.8.8.8\n"), 0444); err != nil {
+		logrus.Error(err)
+		return ""
+	}
+	return tmpConf
+}
+
 func get(envInfo *cmds.Agent) (*config.Node, error) {
 	if envInfo.Debug {
 		logrus.SetLevel(logrus.DebugLevel)
@@ -160,16 +206,27 @@ func get(envInfo *cmds.Agent) (*config.Node, error) {
 		return nil, errors.Wrapf(err, "failed to find host-local")
 	}
 
+	var flannelIface *sysnet.Interface
+	if !envInfo.NoFlannel && len(envInfo.FlannelIface) > 0 {
+		flannelIface, err = sysnet.InterfaceByName(envInfo.FlannelIface)
+		if err != nil {
+			return nil, errors.Wrapf(err, "unable to find interface")
+		}
+	}
+
 	nodeConfig := &config.Node{
 		Docker:                   envInfo.Docker,
 		NoFlannel:                envInfo.NoFlannel,
 		ContainerRuntimeEndpoint: envInfo.ContainerRuntimeEndpoint,
 	}
+	nodeConfig.FlannelIface = flannelIface
 	nodeConfig.LocalAddress = localAddress(controlConfig)
 	nodeConfig.Images = filepath.Join(envInfo.DataDir, "images")
 	nodeConfig.AgentConfig.NodeIP = nodeIP
 	nodeConfig.AgentConfig.NodeName = nodeName
 	nodeConfig.AgentConfig.ClusterDNS = controlConfig.ClusterDNS
+	nodeConfig.AgentConfig.ClusterDomain = controlConfig.ClusterDomain
+	nodeConfig.AgentConfig.ResolvConf = locateOrGenerateResolvConf(envInfo)
 	nodeConfig.AgentConfig.CACertPath = clientCA
 	nodeConfig.AgentConfig.ListenAddress = "127.0.0.1"
 	nodeConfig.AgentConfig.KubeConfig = kubeConfig
@@ -201,6 +258,9 @@ func get(envInfo *cmds.Agent) (*config.Node, error) {
 
 	os.Setenv("NODE_NAME", nodeConfig.AgentConfig.NodeName)
 	v1beta1.KubeletSocket = filepath.Join(envInfo.DataDir, "kubelet/device-plugins/kubelet.sock")
+
+	nodeConfig.AgentConfig.ExtraKubeletArgs = envInfo.ExtraKubeletArgs
+	nodeConfig.AgentConfig.ExtraKubeProxyArgs = envInfo.ExtraKubeProxyArgs
 
 	return nodeConfig, nil
 }
