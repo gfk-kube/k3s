@@ -34,7 +34,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	"golang.org/x/sys/unix"
-	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	"github.com/containerd/cri/pkg/annotations"
 	criconfig "github.com/containerd/cri/pkg/config"
@@ -82,7 +82,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 			RuntimeHandler: r.GetRuntimeHandler(),
 		},
 		sandboxstore.Status{
-			State: sandboxstore.StateInit,
+			State: sandboxstore.StateUnknown,
 		},
 	)
 
@@ -91,6 +91,11 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to get sandbox image %q", c.config.SandboxImage)
 	}
+	containerdImage, err := c.toContainerdImage(ctx, *image)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get image from containerd %q", image.ID)
+	}
+
 	securityContext := config.GetLinux().GetSecurityContext()
 	//Create Network Namespace if it is not in host network
 	hostNet := securityContext.GetNamespaceOptions().GetNetwork() == runtime.NamespaceMode_NODE
@@ -179,7 +184,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	}
 	opts := []containerd.NewContainerOpts{
 		containerd.WithSnapshotter(c.config.ContainerdConfig.Snapshotter),
-		customopts.WithNewSnapshot(id, image.Image),
+		customopts.WithNewSnapshot(id, containerdImage),
 		containerd.WithSpec(spec, specOpts...),
 		containerd.WithContainerLabels(sandboxLabels),
 		containerd.WithContainerExtension(sandboxMetadataExtension, &sandbox.Metadata),
@@ -247,88 +252,65 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get sandbox container info")
 	}
+
+	// Create sandbox task in containerd.
+	log.Tracef("Create sandbox container (id=%q, name=%q).",
+		id, name)
+
+	var taskOpts []containerd.NewTaskOpts
+	// TODO(random-liu): Remove this after shim v1 is deprecated.
+	if c.config.NoPivot && ociRuntime.Type == linuxRuntime {
+		taskOpts = append(taskOpts, containerd.WithNoPivotRoot)
+	}
+	// We don't need stdio for sandbox container.
+	task, err := container.NewTask(ctx, containerdio.NullIO, taskOpts...)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create containerd task")
+	}
+	defer func() {
+		if retErr != nil {
+			deferCtx, deferCancel := ctrdutil.DeferContext()
+			defer deferCancel()
+			// Cleanup the sandbox container if an error is returned.
+			if _, err := task.Delete(deferCtx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
+				logrus.WithError(err).Errorf("Failed to delete sandbox container %q", id)
+			}
+		}
+	}()
+
+	// wait is a long running background request, no timeout needed.
+	exitCh, err := task.Wait(ctrdutil.NamespacedContext())
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to wait for sandbox container task")
+	}
+
+	if err := task.Start(ctx); err != nil {
+		return nil, errors.Wrapf(err, "failed to start sandbox container task %q", id)
+	}
+
 	if err := sandbox.Status.Update(func(status sandboxstore.Status) (sandboxstore.Status, error) {
+		// Set the pod sandbox as ready after successfully start sandbox container.
+		status.Pid = task.Pid()
+		status.State = sandboxstore.StateReady
 		status.CreatedAt = info.CreatedAt
 		return status, nil
 	}); err != nil {
-		return nil, errors.Wrap(err, "failed to update sandbox created timestamp")
+		return nil, errors.Wrap(err, "failed to update sandbox status")
 	}
 
 	// Add sandbox into sandbox store in INIT state.
 	sandbox.Container = container
+
 	if err := c.sandboxStore.Add(sandbox); err != nil {
 		return nil, errors.Wrapf(err, "failed to add sandbox %+v into store", sandbox)
 	}
-	defer func() {
-		// Delete sandbox from sandbox store if there is an error.
-		if retErr != nil {
-			c.sandboxStore.Delete(id)
-		}
-	}()
-	// NOTE(random-liu): Sandbox state only stay in INIT state after this point
-	// and before the end of this function.
-	// * If `Update` succeeds, sandbox state will become READY in one transaction.
-	// * If `Update` fails, sandbox will be removed from the store in the defer above.
-	// * If containerd stops at any point before `Update` finishes, because sandbox
-	// state is not checkpointed, it will be recovered from corresponding containerd task
-	// status during restart:
-	//   * If the task is running, sandbox state will be READY,
-	//   * Or else, sandbox state will be NOTREADY.
+
+	// start the monitor after adding sandbox into the store, this ensures
+	// that sandbox is in the store, when event monitor receives the TaskExit event.
 	//
-	// In any case, sandbox will leave INIT state, so it's safe to ignore sandbox
-	// in INIT state in other functions.
-
-	// Start sandbox container in one transaction to avoid race condition with
-	// event monitor.
-	if err := sandbox.Status.Update(func(status sandboxstore.Status) (_ sandboxstore.Status, retErr error) {
-		// NOTE(random-liu): We should not change the sandbox state to NOTREADY
-		// if `Update` fails.
-		//
-		// If `Update` fails, the sandbox will be cleaned up by all the defers
-		// above. We should not let user see this sandbox, or else they will
-		// see the sandbox disappear after the defer clean up, which may confuse
-		// them.
-		//
-		// Given so, we should keep the sandbox in INIT state if `Update` fails,
-		// and ignore sandbox in INIT state in all the inspection functions.
-
-		// Create sandbox task in containerd.
-		log.Tracef("Create sandbox container (id=%q, name=%q).",
-			id, name)
-
-		var taskOpts []containerd.NewTaskOpts
-		// TODO(random-liu): Remove this after shim v1 is deprecated.
-		if c.config.NoPivot && ociRuntime.Type == linuxRuntime {
-			taskOpts = append(taskOpts, containerd.WithNoPivotRoot)
-		}
-		// We don't need stdio for sandbox container.
-		task, err := container.NewTask(ctx, containerdio.NullIO, taskOpts...)
-		if err != nil {
-			return status, errors.Wrap(err, "failed to create containerd task")
-		}
-		defer func() {
-			if retErr != nil {
-				deferCtx, deferCancel := ctrdutil.DeferContext()
-				defer deferCancel()
-				// Cleanup the sandbox container if an error is returned.
-				// It's possible that task is deleted by event monitor.
-				if _, err := task.Delete(deferCtx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
-					logrus.WithError(err).Errorf("Failed to delete sandbox container %q", id)
-				}
-			}
-		}()
-
-		if err := task.Start(ctx); err != nil {
-			return status, errors.Wrapf(err, "failed to start sandbox container task %q", id)
-		}
-
-		// Set the pod sandbox as ready after successfully start sandbox container.
-		status.Pid = task.Pid()
-		status.State = sandboxstore.StateReady
-		return status, nil
-	}); err != nil {
-		return nil, errors.Wrap(err, "failed to start sandbox container")
-	}
+	// TaskOOM from containerd may come before sandbox is added to store,
+	// but we don't care about sandbox TaskOOM right now, so it is fine.
+	c.eventMonitor.startExitMonitor(context.Background(), id, task.Pid(), exitCh)
 
 	return &runtime.RunPodSandboxResponse{PodSandboxId: id}, nil
 }

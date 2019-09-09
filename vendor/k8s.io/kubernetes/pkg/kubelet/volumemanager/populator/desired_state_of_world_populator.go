@@ -183,6 +183,17 @@ func (dswp *desiredStateOfWorldPopulator) isPodTerminated(pod *v1.Pod) bool {
 func (dswp *desiredStateOfWorldPopulator) findAndAddNewPods() {
 	// Map unique pod name to outer volume name to MountedVolume.
 	mountedVolumesForPod := make(map[volumetypes.UniquePodName]map[string]cache.MountedVolume)
+	if utilfeature.DefaultFeatureGate.Enabled(features.ExpandInUsePersistentVolumes) {
+		for _, mountedVolume := range dswp.actualStateOfWorld.GetMountedVolumes() {
+			mountedVolumes, exist := mountedVolumesForPod[mountedVolume.PodName]
+			if !exist {
+				mountedVolumes = make(map[string]cache.MountedVolume)
+				mountedVolumesForPod[mountedVolume.PodName] = mountedVolumes
+			}
+			mountedVolumes[mountedVolume.OuterVolumeSpecName] = mountedVolume
+		}
+	}
+
 	processedVolumesForFSResize := sets.NewString()
 	for _, pod := range dswp.podManager.GetPods() {
 		if dswp.isPodTerminated(pod) {
@@ -242,13 +253,15 @@ func (dswp *desiredStateOfWorldPopulator) findAndRemoveDeletedPods() {
 
 		if runningContainers {
 			klog.V(4).Infof(
-				"Pod %q has been removed from pod manager. However, it still has one or more containers in the non-exited state. Therefore, it will not be removed from volume manager.",
+				"Pod %q still has one or more containers in the non-exited state. Therefore, it will not be removed from desired state.",
 				format.Pod(volumeToMount.Pod))
 			continue
 		}
-
-		if !dswp.actualStateOfWorld.VolumeExists(volumeToMount.VolumeName) && podExists {
-			klog.V(4).Infof(volumeToMount.GenerateMsgDetailed("Actual state has not yet has this information skip removing volume from desired state", ""))
+		exists, _, _ := dswp.actualStateOfWorld.PodExistsInVolume(volumeToMount.PodName, volumeToMount.VolumeName)
+		if !exists && podExists {
+			klog.V(4).Infof(
+				volumeToMount.GenerateMsgDetailed(fmt.Sprintf("Actual state has not yet has this volume mounted information and pod (%q) still exists in pod manager, skip removing volume from desired state",
+					format.Pod(volumeToMount.Pod)), ""))
 			continue
 		}
 		klog.V(4).Infof(volumeToMount.GenerateMsgDetailed("Removing volume from desired state", ""))
@@ -279,7 +292,7 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(
 
 	// Process volume spec for each volume defined in pod
 	for _, podVolume := range pod.Spec.Volumes {
-		_, volumeSpec, volumeGidValue, err :=
+		pvc, volumeSpec, volumeGidValue, err :=
 			dswp.createVolumeSpec(podVolume, pod.Name, pod.Namespace, mountsMap, devicesMap)
 		if err != nil {
 			klog.Errorf(
@@ -309,6 +322,11 @@ func (dswp *desiredStateOfWorldPopulator) processPodVolumes(
 			podVolume.Name,
 			volumeSpec.Name(),
 			uniquePodName)
+
+		if utilfeature.DefaultFeatureGate.Enabled(features.ExpandInUsePersistentVolumes) {
+			dswp.checkVolumeFSResize(pod, podVolume, pvc, volumeSpec,
+				uniquePodName, mountedVolumesForPod, processedVolumesForFSResize)
+		}
 	}
 
 	// some of the volume additions may have failed, should not mark this pod as fully processed

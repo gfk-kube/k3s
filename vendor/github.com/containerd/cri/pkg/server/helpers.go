@@ -25,12 +25,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/runtime/linux/runctypes"
 	runcoptions "github.com/containerd/containerd/runtime/v2/runc/options"
 	"github.com/containerd/typeurl"
@@ -41,7 +39,7 @@ import (
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
-	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	criconfig "github.com/containerd/cri/pkg/config"
 	"github.com/containerd/cri/pkg/store"
@@ -287,6 +285,15 @@ func (c *criService) localResolve(refOrID string) (imagestore.Image, error) {
 		imageID = refOrID
 	}
 	return c.imageStore.Get(imageID)
+}
+
+// toContainerdImage converts an image object in image store to containerd image handler.
+func (c *criService) toContainerdImage(ctx context.Context, image imagestore.Image) (containerd.Image, error) {
+	// image should always have at least one reference.
+	if len(image.References) == 0 {
+		return nil, errors.Errorf("invalid image with no reference %q", image.ID)
+	}
+	return c.client.GetImage(ctx, image.References[0])
 }
 
 // getUserFromImage gets uid or user name of the image user.
@@ -578,31 +585,6 @@ func unknownSandboxStatus() sandboxstore.Status {
 	return sandboxstore.Status{
 		State: sandboxstore.StateUnknown,
 	}
-}
-
-// unknownExitStatus generates containerd.Status for container exited with unknown exit code.
-func unknownExitStatus() containerd.Status {
-	return containerd.Status{
-		Status:     containerd.Stopped,
-		ExitStatus: unknownExitCode,
-		ExitTime:   time.Now(),
-	}
-}
-
-// getTaskStatus returns status for a given task. It returns unknown exit status if
-// the task is nil or not found.
-func getTaskStatus(ctx context.Context, task containerd.Task) (containerd.Status, error) {
-	if task == nil {
-		return unknownExitStatus(), nil
-	}
-	status, err := task.Status(ctx)
-	if err != nil {
-		if !errdefs.IsNotFound(err) {
-			return containerd.Status{}, err
-		}
-		return unknownExitStatus(), nil
-	}
-	return status, nil
 }
 
 func getCurrentOOMScoreAdj() (int, error) {

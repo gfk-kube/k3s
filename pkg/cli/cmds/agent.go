@@ -11,11 +11,13 @@ type Agent struct {
 	Token                    string
 	TokenFile                string
 	ServerURL                string
+	DisableLoadBalancer      bool
 	ResolvConf               string
 	DataDir                  string
 	NodeIP                   string
 	NodeName                 string
 	ClusterSecret            string
+	PauseImage               string
 	Docker                   bool
 	ContainerRuntimeEndpoint string
 	NoFlannel                bool
@@ -25,6 +27,8 @@ type Agent struct {
 	AgentShared
 	ExtraKubeletArgs   cli.StringSlice
 	ExtraKubeProxyArgs cli.StringSlice
+	Labels             cli.StringSlice
+	Taints             cli.StringSlice
 }
 
 type AgentShared struct {
@@ -65,9 +69,14 @@ var (
 		Usage:       "(agent) Disable embedded containerd and use alternative CRI implementation",
 		Destination: &AgentConfig.ContainerRuntimeEndpoint,
 	}
+	PauseImageFlag = cli.StringFlag{
+		Name:        "pause-image",
+		Usage:       "(agent) Customized pause image for containerd sandbox",
+		Destination: &AgentConfig.PauseImage,
+	}
 	ResolvConfFlag = cli.StringFlag{
 		Name:        "resolv-conf",
-		Usage:       "Kubelet resolv.conf file",
+		Usage:       "(agent) Kubelet resolv.conf file",
 		EnvVar:      "K3S_RESOLV_CONF",
 		Destination: &AgentConfig.ResolvConf,
 	}
@@ -81,6 +90,16 @@ var (
 		Usage: "(agent) Customized flag for kube-proxy process",
 		Value: &AgentConfig.ExtraKubeProxyArgs,
 	}
+	NodeTaints = cli.StringSliceFlag{
+		Name:  "node-taint",
+		Usage: "(agent) Registering kubelet with set of taints",
+		Value: &AgentConfig.Taints,
+	}
+	NodeLabels = cli.StringSliceFlag{
+		Name:  "node-label",
+		Usage: "(agent) Registering kubelet with set of labels",
+		Value: &AgentConfig.Labels,
+	}
 )
 
 func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
@@ -90,6 +109,10 @@ func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
 		UsageText: appName + " agent [OPTIONS]",
 		Action:    action,
 		Flags: []cli.Flag{
+			VLevel,
+			VModule,
+			LogFile,
+			AlsoLogToStderr,
 			cli.StringFlag{
 				Name:        "token,t",
 				Usage:       "Token to use for authentication",
@@ -131,9 +154,12 @@ func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
 			NodeNameFlag,
 			NodeIPFlag,
 			CRIEndpointFlag,
+			PauseImageFlag,
 			ResolvConfFlag,
 			ExtraKubeletArgs,
 			ExtraKubeProxyArgs,
+			NodeLabels,
+			NodeTaints,
 		},
 	}
 }

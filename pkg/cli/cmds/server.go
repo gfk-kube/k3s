@@ -5,7 +5,6 @@ import (
 )
 
 type Server struct {
-	Log                 string
 	ClusterCIDR         string
 	ClusterSecret       string
 	ServiceCIDR         string
@@ -17,12 +16,20 @@ type Server struct {
 	DisableAgent        bool
 	KubeConfigOutput    string
 	KubeConfigMode      string
-	KnownIPs            cli.StringSlice
+	TLSSan              cli.StringSlice
 	BindAddress         string
 	ExtraAPIArgs        cli.StringSlice
 	ExtraSchedulerArgs  cli.StringSlice
 	ExtraControllerArgs cli.StringSlice
 	Rootless            bool
+	StoreBootstrap      bool
+	StorageEndpoint     string
+	StorageCAFile       string
+	StorageCertFile     string
+	StorageKeyFile      string
+	AdvertiseIP         string
+	AdvertisePort       int
+	DisableScheduler    bool
 }
 
 var ServerConfig Server
@@ -34,6 +41,10 @@ func NewServerCommand(action func(*cli.Context) error) cli.Command {
 		UsageText: appName + " server [OPTIONS]",
 		Action:    action,
 		Flags: []cli.Flag{
+			VLevel,
+			VModule,
+			LogFile,
+			AlsoLogToStderr,
 			cli.StringFlag{
 				Name:        "bind-address",
 				Usage:       "k3s bind address (default: localhost)",
@@ -60,11 +71,6 @@ func NewServerCommand(action func(*cli.Context) error) cli.Command {
 				Name:        "disable-agent",
 				Usage:       "Do not run a local agent and register a local kubelet",
 				Destination: &ServerConfig.DisableAgent,
-			},
-			cli.StringFlag{
-				Name:        "log,l",
-				Usage:       "Log to file",
-				Destination: &ServerConfig.Log,
 			},
 			cli.StringFlag{
 				Name:        "cluster-cidr",
@@ -115,7 +121,7 @@ func NewServerCommand(action func(*cli.Context) error) cli.Command {
 			cli.StringSliceFlag{
 				Name:  "tls-san",
 				Usage: "Add additional hostname or IP as a Subject Alternative Name in the TLS cert",
-				Value: &ServerConfig.KnownIPs,
+				Value: &ServerConfig.TLSSan,
 			},
 			cli.StringSliceFlag{
 				Name:  "kube-apiserver-arg",
@@ -137,15 +143,64 @@ func NewServerCommand(action func(*cli.Context) error) cli.Command {
 				Usage:       "(experimental) Run rootless",
 				Destination: &ServerConfig.Rootless,
 			},
+			cli.BoolFlag{
+				Name:        "bootstrap-save",
+				Usage:       "(experimental) Save bootstrap information in the storage endpoint",
+				Hidden:      true,
+				Destination: &ServerConfig.StoreBootstrap,
+			},
+			cli.StringFlag{
+				Name:        "storage-endpoint",
+				Usage:       "Specify etcd, Mysql, Postgres, or Sqlite (default) data source name",
+				Destination: &ServerConfig.StorageEndpoint,
+				EnvVar:      "K3S_STORAGE_ENDPOINT",
+			},
+			cli.StringFlag{
+				Name:        "storage-cafile",
+				Usage:       "SSL Certificate Authority file used to secure storage backend communication",
+				Destination: &ServerConfig.StorageCAFile,
+				EnvVar:      "K3S_STORAGE_CAFILE",
+			},
+			cli.StringFlag{
+				Name:        "storage-certfile",
+				Usage:       "SSL certification file used to secure storage backend communication",
+				Destination: &ServerConfig.StorageCertFile,
+				EnvVar:      "K3S_STORAGE_CERTFILE",
+			},
+			cli.StringFlag{
+				Name:        "storage-keyfile",
+				Usage:       "SSL key file used to secure storage backend communication",
+				Destination: &ServerConfig.StorageKeyFile,
+				EnvVar:      "K3S_STORAGE_KEYFILE",
+			},
+			cli.StringFlag{
+				Name:        "advertise-address",
+				Usage:       "IP address that apiserver uses to advertise to members of the cluster",
+				Destination: &ServerConfig.AdvertiseIP,
+			},
+			cli.IntFlag{
+				Name:        "advertise-port",
+				Usage:       "Port that apiserver uses to advertise to members of the cluster",
+				Value:       0,
+				Destination: &ServerConfig.AdvertisePort,
+			},
+			cli.BoolFlag{
+				Name:        "disable-scheduler",
+				Usage:       "Disable Kubernetes default scheduler",
+				Destination: &ServerConfig.DisableScheduler,
+			},
 			NodeIPFlag,
 			NodeNameFlag,
 			DockerFlag,
 			FlannelFlag,
 			FlannelIfaceFlag,
 			CRIEndpointFlag,
+			PauseImageFlag,
 			ResolvConfFlag,
 			ExtraKubeletArgs,
 			ExtraKubeProxyArgs,
+			NodeLabels,
+			NodeTaints,
 		},
 	}
 }

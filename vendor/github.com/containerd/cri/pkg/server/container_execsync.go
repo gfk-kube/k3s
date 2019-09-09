@@ -29,7 +29,7 @@ import (
 	"golang.org/x/net/context"
 	"golang.org/x/sys/unix"
 	"k8s.io/client-go/tools/remotecommand"
-	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	ctrdutil "github.com/containerd/cri/pkg/containerd/util"
 	cioutil "github.com/containerd/cri/pkg/ioutil"
@@ -131,7 +131,7 @@ func (c *criService) execInContainer(ctx context.Context, id string, opts execOp
 	defer func() {
 		deferCtx, deferCancel := ctrdutil.DeferContext()
 		defer deferCancel()
-		if _, err := process.Delete(deferCtx); err != nil {
+		if _, err := process.Delete(deferCtx, containerd.WithProcessKill); err != nil {
 			logrus.WithError(err).Errorf("Failed to delete exec process %q for container %q", execID, id)
 		}
 	}()

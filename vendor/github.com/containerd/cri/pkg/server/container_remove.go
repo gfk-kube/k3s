@@ -23,7 +23,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
-	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	"github.com/containerd/cri/pkg/log"
 	"github.com/containerd/cri/pkg/store"
@@ -104,6 +104,9 @@ func setContainerRemoving(container containerstore.Container) error {
 		}
 		if status.State() == runtime.ContainerState_CONTAINER_UNKNOWN {
 			return status, errors.New("container state is unknown, to stop first")
+		}
+		if status.Starting {
+			return status, errors.New("container is in starting state, can't be removed")
 		}
 		if status.Removing {
 			return status, errors.New("container is already in removing state")
